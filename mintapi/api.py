@@ -5,6 +5,7 @@ import random
 import re
 import requests
 import time
+from twilio.rest import Client
 
 try:
     from StringIO import StringIO  # Python 2
@@ -12,6 +13,7 @@ except ImportError:
     from io import BytesIO as StringIO  # Python 3
 
 from seleniumrequests import Chrome
+from selenium.webdriver.chrome.options import Options
 import xmltodict
 
 try:
@@ -43,8 +45,13 @@ def reverse_credit_amount(row):
     return amount if row['isDebit'] else -amount
 
 
-def get_web_driver(email, password):
-    driver = Chrome()
+def get_web_driver(email, password, twilio_account=None, twilio_token=None,
+        twilio_number=None):
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+
+    driver = Chrome(chrome_options=chrome_options)
 
     driver.get("https://www.mint.com")
     driver.implicitly_wait(20)  # seconds
@@ -54,7 +61,12 @@ def get_web_driver(email, password):
     driver.find_element_by_id("ius-password").send_keys(password)
     driver.find_element_by_id("ius-sign-in-submit-btn").submit()
 
-    # Wait until logged in, just in case we need to deal with MFA.
+    time.sleep(20)
+    if driver.current_url.startswith("https://accounts.intuit.com"):
+        code = get_mfa_code(twilio_account, twilio_token, twilio_number)
+        driver.find_element_by_id("ius-mfa-confirm-code").send_keys(code)
+        driver.find_element_by_id("ius-mfa-otp-submit-btn").submit()
+
     while not driver.current_url.startswith(
             'https://mint.intuit.com/overview.event'):
         time.sleep(1)
@@ -68,6 +80,11 @@ def get_web_driver(email, password):
 
 IGNORE_FLOAT_REGEX = re.compile(r"[$,%]")
 
+def get_mfa_code(acount_sid, auth_token, phone_number):
+    # twilio retrieve
+    client = Client(acount_sid, auth_token)
+    body = client.messages.list(to=phone_number,limit=1)[0].body
+    return [int(s) for s in body.split() if s.isdigit()][0]
 
 def parse_float(str_number):
     try:
@@ -112,9 +129,11 @@ class Mint():
     token = None
     driver = None
 
-    def __init__(self, email=None, password=None):
+    def __init__(self, email=None, password=None, twilio_account=None,
+            twilio_token=None, twilio_number=None):
         if email and password:
-            self.login_and_get_token(email, password)
+            self.login_and_get_token(email, password, twilio_account,
+                    twilio_token, twilio_number)
 
     @classmethod
     def create(cls, email, password):
@@ -172,11 +191,13 @@ class Mint():
     def post(self, url, **kwargs):
         return self.driver.request('POST', url, **kwargs)
 
-    def login_and_get_token(self, email, password):
+    def login_and_get_token(self, email, password, twilio_account=None,
+            twilio_token=None, twilio_number=None):
         if self.token and self.driver:
             return
 
-        self.driver = get_web_driver(email, password)
+        self.driver = get_web_driver(email, password, twilio_account,
+                twilio_token,twilio_number)
         self.token = self.get_token()
 
     def get_token(self):
@@ -764,7 +785,6 @@ def main():
             skip_duplicates=options.skip_duplicates)
     elif options.net_worth:
         data = mint.get_net_worth()
-
     # output the data
     if options.transactions or options.extended_transactions:
         if options.filename is None:
